@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <vector>
+//#include <windows.h>
 
 #include <nlohmann/json.hpp>
 using Json = nlohmann::json;
@@ -19,12 +20,11 @@ class EngineEditor final
 			Create,
 			//Open,
 			Opened
-		};
+		} static projectState;
 
-		static ProjectState projectState;
 		std::string projectName;
 		std::string projectPath;
-		std::vector<std::string> customComponents;
+		std::vector<std::pair<std::string, std::string>> customComponents; // name, last write time
 	};
 	struct FieldData final
 	{
@@ -51,7 +51,8 @@ class EngineEditor final
 	static char newObjectName[50];
 
 	static bool createComponent;
-	static char componentName[100];
+	static char newComponentName[100];
+	static std::map<std::string, const void*> loadedCustomComponents;
 
 	static int fieldIndex;
 	static int buttonIndex;
@@ -59,7 +60,6 @@ class EngineEditor final
 
 	static void DrawMenuBar();
 	static void DrawCreateProjectMenu();
-	static void DrawOpenProjectMenu();
 	static void DrawOpenedProjectMenu();
 	static void DrawLoadedAssetsMenu();
 

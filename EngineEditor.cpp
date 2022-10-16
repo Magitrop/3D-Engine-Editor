@@ -48,7 +48,8 @@ bool EngineEditor::changeObjectName;
 char EngineEditor::newObjectName[50]{};
 
 bool EngineEditor::createComponent;
-char EngineEditor::componentName[100]{};
+char EngineEditor::newComponentName[100]{};
+std::map<std::string, const void*> EngineEditor::loadedCustomComponents;
 
 int EngineEditor::fieldIndex = -1;
 int EngineEditor::buttonIndex = 0;
@@ -93,7 +94,7 @@ void EngineEditor::DrawMenuBar()
 					createComponent = true;
 
 					for (int i = 0; i < 50; i++)
-						componentName[i] = 0;
+						newComponentName[i] = 0;
 				}
 				if (ImGui::MenuItem("Update Components"))
 				{
@@ -149,28 +150,6 @@ void EngineEditor::DrawCreateProjectMenu()
 	}
 	ImGui::End();
 }
-void EngineEditor::DrawOpenProjectMenu()
-{
-	/*ImGui::SetNextWindowSize(ImVec2(500, 75));
-	if (ImGui::Begin("Open project", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse))
-	{
-		static char projectName[100]{};
-
-		ImGuiStyle& style = ImGui::GetStyle();
-		float size = ImGui::CalcTextSize("Enter project name:").x + style.FramePadding.x * 2.0f;
-		float avail = ImGui::GetContentRegionAvail().x;
-		float off = (avail - size) * 0.5f;
-		if (off > 0.0f)
-			ImGui::SetCursorPosX(ImGui::GetCursorPosX() + off);
-		ImGui::Text("Enter project name:");
-
-		ImGui::PushItemWidth(375);
-		ImGui::InputText("##label", projectName, IM_ARRAYSIZE(projectName)); ImGui::SameLine();
-		if (ImGui::Button("Open", ImVec2(100, 20)))
-			OpenProject(std::string(projectName));
-	}
-	ImGui::End();*/
-}
 void EngineEditor::DrawOpenedProjectMenu()
 {
 #pragma region ObjectsHierarchy
@@ -185,7 +164,7 @@ void EngineEditor::DrawOpenedProjectMenu()
 	{
 		ImGui::PushItemWidth(ImGui::GetWindowSize().x);
 		int objIndex = 0;
-		for (auto& obj : ObjectsManager::instantiatedObjects)
+		for (auto& obj : ObjectsManager->instantiatedObjects)
 		{
 			if (obj->shouldBeSerialized && ImGui::Selectable((obj->name + "##" + std::to_string(objIndex++)).c_str(), false))
 			{
@@ -200,7 +179,7 @@ void EngineEditor::DrawOpenedProjectMenu()
 		}
 		if (ImGui::Button("+"))
 		{
-			ObjectsManager::Instantiate();
+			ObjectsManager->Instantiate();
 		}
 	}
 	ImGui::End();
@@ -236,11 +215,17 @@ void EngineEditor::DrawOpenedProjectMenu()
 			ImGui::SameLine();
 			if (ImGui::Button("Destroy"))
 			{
-				ObjectsManager::DestroyObject(selectedGameObject);
+				ObjectsManager->DestroyObject(selectedGameObject);
 				selectedGameObject = nullptr;
 			}
 			else
 			{
+				fields.clear();
+				for (auto& comp : selectedGameObject->components)
+					comp.second->Serialize(serializedObject);
+				if (serializedObject.is_object())
+					GetComponentFields(serializedObject);
+
 				bool addedNew = false;
 				fieldIndex = -1;
 				buttonIndex = 0;
@@ -260,12 +245,6 @@ void EngineEditor::DrawOpenedProjectMenu()
 					SetComponentFields(serializedObject);
 					for (auto& comp : selectedGameObject->components)
 						comp.second->Deserialize(serializedObject);
-				}
-				else
-				{
-					fields.clear();
-					if (serializedObject.is_object())
-						GetComponentFields(serializedObject);
 				}
 
 				ImGui::NewLine();
@@ -294,15 +273,14 @@ void EngineEditor::DrawOpenedProjectMenu()
 					}
 					for (auto& comp : currentProject->customComponents)
 					{
-						if (ImGui::Selectable(comp.c_str()))
+						if (ImGui::Selectable(comp.first.c_str()))
 						{
-							std::string componentPath = currentProject->projectName + R"(\)";
-							componentPath += comp.c_str();
-							componentPath += R"(.dll)";
-							HINSTANCE hDll = LoadLibraryA(componentPath.c_str());
-							if (hDll)
+							if (loadedCustomComponents[comp.first])
 							{
-								reinterpret_cast<void(*)(GameObject*)>(GetProcAddress(hDll, "AddToObject"))(selectedGameObject);
+								reinterpret_cast<void(*)(GameObject*, const Json&)>
+									(GetProcAddress((HMODULE)loadedCustomComponents[comp.first], "_add_comp"))
+									(selectedGameObject, Json());
+
 								fields.clear();
 								serializedObject = Json();
 								for (auto& comp : selectedGameObject->components)
@@ -312,7 +290,7 @@ void EngineEditor::DrawOpenedProjectMenu()
 							}
 							else
 							{
-								std::cout << "Unable to load component " << comp << std::endl;
+								std::cout << "Unable to load component " << comp.first << std::endl;
 							}
 						}
 					}
@@ -399,7 +377,7 @@ bool EngineEditor::DrawUploadResourceMenu()
 					std::string(fragmentShaderPath).size() > 0 &&
 					std::string(shaderName).size() > 0)
 				{
-					ResourceManager::UploadShader(Shader(vertexShaderPath, fragmentShaderPath), shaderName);
+					ResourceManager->UploadShader(Shader(vertexShaderPath, fragmentShaderPath), shaderName);
 					uploaded = true;
 				}
 				ImGui::SameLine();
@@ -428,7 +406,7 @@ bool EngineEditor::DrawUploadResourceMenu()
 					std::string(modelPath).size() > 0 &&
 					std::string(modelName).size() > 0)
 				{
-					ResourceManager::UploadModel(Model(modelPath), modelName);
+					ResourceManager->UploadModel(Model(modelPath), modelName);
 					uploaded = true;
 				}
 				ImGui::SameLine();
@@ -470,10 +448,10 @@ bool EngineEditor::DrawCreateComponentMenu()
 	if (ImGui::Begin("Create Component", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize))
 	{
 		ImGui::Text("Component Name"); ImGui::SameLine();
-		ImGui::InputText("##label", componentName, 50);
+		ImGui::InputText("##label", newComponentName, 50);
 		if (ImGui::Button("Create", ImVec2(ImGui::GetWindowWidth() / 2 - 10, 20)))
 		{
-			CreateComponent(componentName);
+			CreateComponent(newComponentName);
 			created = true;
 		}
 		ImGui::SameLine();
@@ -545,25 +523,30 @@ void EngineEditor::OpenProject()
 		if (components.is_array())
 			for (auto& o : components.get<Json::array_t>())
 			{
-				currentProject->customComponents.push_back(o.get<Json::string_t>());
-				if (!std::filesystem::exists(currentProject->projectName + R"(\)" + o.get<Json::string_t>() + ".dll"))
+				std::string componentName = o["name"];
+				std::string lastWriteTime = o["date"];
+				currentProject->customComponents.push_back(std::make_pair(componentName, lastWriteTime));
+				if (std::to_string(std::filesystem::last_write_time(currentProject->projectName + R"(\)" + componentName + ".cpp").time_since_epoch().count())
+					!= lastWriteTime)
 				{
 					std::stringstream cmd;
 					cmd << R"(call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64 )"
 						R"(&& cl /std:c++17 /EHsc /MDd "libraries\glad\src\glad.c" ")"
 						<< currentProject->projectName << R"(\ComponentsEntry.cpp" ")"
-						<< currentProject->projectName << R"(\)" << o.get<Json::string_t>() << R"(.cpp" /Fo".\)"
+						<< currentProject->projectName << R"(\)" << componentName << R"(.cpp" /Fo".\)"
 						<< currentProject->projectName << R"(\\")"
-						R"( /I"..\WindowLib")"
+						R"( /I"..\EngineLib")"
 						R"( /I"libraries\glad\include")"
 						R"( /I"libraries\glfw\include")"
 						R"( /I"libraries\glm")"
 						R"( /I"libraries\json\include")"
 						R"( /I"libraries\assimp\include")"
-						R"( /link opengl32.lib user32.lib gdi32.lib shell32.lib "..\WindowLib\x64\Debug\WindowLib.lib" "libraries\glad\Debug\glad.lib" "libraries\glfw\build\src\Debug\glfw3.lib" "libraries\assimp\lib\Debug\assimp.lib")"
+						R"( /I"libraries\engine\debug\include")"
+						R"( /I"libraries\controllers\debug\include")"
+						R"( /link opengl32.lib user32.lib gdi32.lib shell32.lib "libraries\glad\Debug\glad.lib" "libraries\glfw\build\src\Debug\glfw3.lib" "libraries\assimp\lib\Debug\assimp.lib")"
 						R"(&& link /DLL /out:")"
-						<< currentProject->projectName << R"(\)" << o.get<Json::string_t>() << R"(.dll" ")"
-						<< currentProject->projectName << R"(\)" << o.get<Json::string_t>() << R"(.obj" ")"
+						<< currentProject->projectName << R"(\)" << componentName << R"(.dll" ")"
+						<< currentProject->projectName << R"(\)" << componentName << R"(.obj" ")"
 						<< currentProject->projectName << R"(\ComponentsEntry.obj")";
 					system(cmd.str().c_str());
 				}
@@ -573,7 +556,7 @@ void EngineEditor::OpenProject()
 		if (scene.is_array())
 			for (auto& o : scene.get<Json::array_t>())
 			{
-				GameObject* obj = ObjectsManager::Instantiate();
+				GameObject* obj = ObjectsManager->Instantiate();
 				obj->name = o.begin().key();
 				for (auto& comp : o.begin().value().get<Json::array_t>())
 				{
@@ -596,22 +579,33 @@ void EngineEditor::OpenProject()
 					}
 					else
 					{
-						std::string componentPath = currentProject->projectName + R"(\)";
-						componentPath += componentName;
-						componentPath += R"(.dll)";
-						HINSTANCE hDll = LoadLibraryA(componentPath.c_str());
-						if (hDll)
+						if (loadedCustomComponents.find(componentName) == loadedCustomComponents.end())
 						{
-							reinterpret_cast<void(*)(GameObject*)>(GetProcAddress(hDll, "AddToObject"))(obj);
+							std::string componentPath = currentProject->projectName + R"(\)";
+							componentPath += componentName;
+							componentPath += R"(.dll)";
+							HINSTANCE hDll = LoadLibraryA(componentPath.c_str());
+							if (hDll)
+							{
+								loadedCustomComponents[componentName] = hDll;
+								reinterpret_cast<void(*)(SingletonManager*)>(GetProcAddress(hDll, "_set_singleton_manager"))(SingletonManager::Instance());
+								reinterpret_cast<void(*)(GameObject*, const Json&)>(GetProcAddress(hDll, "_add_comp"))(obj, comp);
+							}
+							else
+							{
+								std::cout << "Unable to load component " << componentName << std::endl;
+							}
 						}
 						else
 						{
-							std::cout << "Unable to load component " << componentName << std::endl;
+							reinterpret_cast<void(*)(GameObject*, const Json&)>
+								(GetProcAddress((HMODULE)loadedCustomComponents[componentName], "_add_comp"))
+								(obj, comp);
 						}
-						// load custom component;
 					}
 				}
 			}
+		//UpdateComponents();
 	}
 	catch (Json::parse_error)
 	{
@@ -619,13 +613,13 @@ void EngineEditor::OpenProject()
 		delete currentProject;
 		currentProject = nullptr;
 
-		glfwSetWindowTitle(InitializationHandler::GetWindow(), "Current project: none");
+		glfwSetWindowTitle(InitializationHandler->GetWindow(), "Current project: none");
 		Project::projectState = Project::ProjectState::None;
 		return;
 	}
 
 	std::string windowTitle = "Current project: " + currentProject->projectName;
-	glfwSetWindowTitle(InitializationHandler::GetWindow(), windowTitle.c_str());
+	glfwSetWindowTitle(InitializationHandler->GetWindow(), windowTitle.c_str());
 
 	ResetProject();
 	CreateMainObjects();
@@ -645,6 +639,7 @@ void EngineEditor::CreateProject(std::string projectName)
 	componentsEntryFile << R"(
 #include <windows.h>
 #include <iostream>
+#include <Singleton.h>
 
 #pragma comment(lib, "opengl32.lib")
 #pragma comment(lib, "user32.lib")
@@ -652,7 +647,7 @@ void EngineEditor::CreateProject(std::string projectName)
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "glad.lib")
 #pragma comment(lib, "glfw3.lib")
-#pragma comment(lib, "WindowLib.lib")
+#pragma comment(lib, "EngineLib.lib")
 
 BOOL APIENTRY DllMain(HMODULE hModule,
     DWORD  ul_reason_for_call,
@@ -675,6 +670,10 @@ INT WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     return 0;
 }
 
+extern "C" __declspec(dllexport) inline void _set_singleton_manager(SingletonManager* instance)
+{
+    SingletonManager::Instance() = instance;
+}
 )";
 
 	std::ofstream cmakeFile(currentProject->projectPath + "/CMakeLists.txt");
@@ -694,7 +693,7 @@ find_package(Imgui REQUIRED PATHS "${PARENT_DIR}/libraries/imgui")
 
 include_directories(${PARENT_DIR}/libraries/engine/debug/include)
 link_directories(${PARENT_DIR}/libraries/engine/debug/lib)
-find_library(EngineLib WindowLib "${PARENT_DIR}/libraries/engine/debug/lib")
+find_library(EngineLib EngineLib "${PARENT_DIR}/libraries/engine/debug/lib")
 
 include_directories(${PARENT_DIR}/libraries/controllers/debug/include)
 link_directories(${PARENT_DIR}/libraries/controllers/debug/lib)
@@ -765,7 +764,8 @@ target_sources(${PROJECT_NAME} PRIVATE ${FILES_TO_ADD})
 }
 void EngineEditor::CreateComponent(std::string componentName)
 {
-	currentProject->customComponents.push_back(componentName);
+	if (!currentProject)
+		return;
 
 	std::ofstream componentFile(currentProject->projectPath + "/" + componentName + ".cpp");
 	componentFile << R"(
@@ -773,40 +773,71 @@ void EngineEditor::CreateComponent(std::string componentName)
 
 extern "C"
 {
-	class )" + componentName + R"( : public Component
+	namespace )" + componentName + R"(
 	{
-		COMPONENT()" + componentName + R"(, Component)
-	public:
-		int sample;
-
-		void Serialize(Json& writeTo) override
+		class )" + componentName + R"( : public Component
 		{
-			writeTo[GetComponentName()]["sample"] = sample;
+			COMPONENT()" + componentName + R"(, Component)
+		public:
+			int sample;
+
+			void Serialize(Json& writeTo) override
+			{
+				writeTo[GetComponentName()]["sample"] = sample;
+			}
+
+			void Deserialize(const Json& readFrom) override
+			{
+				if (readFrom[GetComponentName()].contains("sample")) sample = readFrom[GetComponentName()]["sample"];
+			}
+
+			virtual std::string GetComponentName() override
+			{
+				return ")" + componentName + R"(";
+			}
+		};
+
+		// do not modify!
+		__declspec(dllexport) inline void _add_comp(GameObject* go, const Json& readFrom)
+		{
+			gladLoadGL();
+			if (readFrom.is_null())
+				go->AddComponent<)" + componentName + R"(>();
+			else
+				go->AddComponent<)" + componentName + R"(>()->Deserialize(readFrom);
 		}
 
-		void Deserialize(const Json& readFrom) override
+		// do not modify!
+		__declspec(dllexport) inline void _remove_comp(GameObject* go)
 		{
-			sample = readFrom[GetComponentName()]["sample"];
+			go->RemoveComponent<)" + componentName + R"(>();
 		}
 
-		virtual std::string GetComponentName() override
+		// do not modify!
+		__declspec(dllexport) inline bool _has_comp(GameObject* go)
 		{
-			return ")" + componentName + R"(";
+			return go->HasComponent<)" + componentName + R"(>();
 		}
-	};
 
-	// do not modify!
-	__declspec(dllexport) void AddToObject(GameObject* go)
-	{
-		go->AddComponent<)" + componentName + R"(>();
+		// do not modify!
+		__declspec(dllexport) inline Json _serialize_comp(GameObject* go)
+		{
+			Json j;
+			go->GetComponent<)" + componentName + R"(>()->Serialize(j);
+			return j;
+		}
 	}
 }
 )";
 	componentFile.close();
+	currentProject->customComponents.push_back(
+		std::make_pair(
+			componentName, 
+			"0"));
 
 	std::string allComponents;
 	for (auto it = currentProject->customComponents.begin(); it != currentProject->customComponents.end(); it++)
-		allComponents += *it + ".cpp\n";
+		allComponents += it->first + ".cpp\n";
 	std::ofstream cmakeFile(currentProject->projectPath + "/CMakeLists.txt");
 	cmakeFile << R"(
 cmake_minimum_required(VERSION 3.22 FATAL_ERROR)
@@ -824,7 +855,7 @@ find_package(Imgui REQUIRED PATHS "${PARENT_DIR}/libraries/imgui")
 
 include_directories(${PARENT_DIR}/libraries/engine/debug/include)
 link_directories(${PARENT_DIR}/libraries/engine/debug/lib)
-find_library(EngineLib WindowLib "${PARENT_DIR}/libraries/engine/debug/lib")
+find_library(EngineLib EngineLib "${PARENT_DIR}/libraries/engine/debug/lib")
 
 include_directories(${PARENT_DIR}/libraries/controllers/debug/include)
 link_directories(${PARENT_DIR}/libraries/controllers/debug/lib)
@@ -887,32 +918,83 @@ target_sources(${PROJECT_NAME} PRIVATE ${FILES_TO_ADD})
 }
 void EngineEditor::UpdateComponents()
 {
+	if (!currentProject)
+		return;
+
+	std::map<std::string, std::vector<std::pair<GameObject*, Json>>> objectsWithCustomComponents;
+	for (auto& obj : ObjectsManager->instantiatedObjects)
+		for (auto& comp : loadedCustomComponents)
+			if (comp.second != nullptr && 
+				reinterpret_cast<bool(*)(GameObject*)>(GetProcAddress((HMODULE)comp.second, "_has_comp"))(obj))
+			{
+				Json serializedComp = reinterpret_cast<Json(*)(GameObject*)>(GetProcAddress((HMODULE)comp.second, "_serialize_comp"))(obj);
+				reinterpret_cast<void(*)(GameObject*)>(GetProcAddress((HMODULE)comp.second, "_remove_comp"))(obj);
+				objectsWithCustomComponents[comp.first].push_back(std::make_pair(obj, serializedComp));
+			}
+
+	for (auto& comp : loadedCustomComponents)
+		FreeLibrary((HMODULE)comp.second);
+	loadedCustomComponents.clear();
+
 	for (auto& comp : currentProject->customComponents)
 	{
-		std::stringstream cmd;
-		cmd << R"(call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64 )"
-			R"(&& cl /std:c++17 /EHsc /MDd "libraries\glad\src\glad.c" ")"
-			<< currentProject->projectName << R"(\ComponentsEntry.cpp" ")"
-			<< currentProject->projectName << R"(\)" << comp << R"(.cpp" /Fo".\)"
-			<< currentProject->projectName << R"(\\")"
-			R"( /I"..\WindowLib")"
-			R"( /I"libraries\glad\include")"
-			R"( /I"libraries\glfw\include")"
-			R"( /I"libraries\glm")"
-			R"( /I"libraries\json\include")"
-			R"( /I"libraries\assimp\include")"
-			R"( /link opengl32.lib user32.lib gdi32.lib shell32.lib "..\WindowLib\x64\Debug\WindowLib.lib" "libraries\glad\Debug\glad.lib" "libraries\glfw\build\src\Debug\glfw3.lib" "libraries\assimp\lib\Debug\assimp.lib")"
-			R"(&& link /DLL /out:")"
-			<< currentProject->projectName << R"(\)" << comp << R"(.dll" ")"
-			<< currentProject->projectName << R"(\)" << comp << R"(.obj" ")"
-			<< currentProject->projectName << R"(\ComponentsEntry.obj")";
-		system(cmd.str().c_str());
+		if (std::to_string(std::filesystem::last_write_time(currentProject->projectName + R"(\)" + comp.first + ".cpp").time_since_epoch().count())
+			!= comp.second)
+		{
+			std::stringstream cmd;
+			cmd << R"(call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64 )"
+				R"(&& cl /std:c++17 /EHsc /MDd "libraries\glad\src\glad.c" ")"
+				<< currentProject->projectName << R"(\ComponentsEntry.cpp" ")"
+				<< currentProject->projectName << R"(\)" << comp.first << R"(.cpp" /Fo".\)"
+				<< currentProject->projectName << R"(\\")"
+				R"( /I"..\EngineLib")"
+				R"( /I"libraries\glad\include")"
+				R"( /I"libraries\glfw\include")"
+				R"( /I"libraries\glm")"
+				R"( /I"libraries\json\include")"
+				R"( /I"libraries\assimp\include")"
+				R"( /I"libraries\engine\debug\include")"
+				R"( /I"libraries\controllers\debug\include")"
+				R"( /link opengl32.lib user32.lib gdi32.lib shell32.lib "libraries\glad\Debug\glad.lib" "libraries\glfw\build\src\Debug\glfw3.lib" "libraries\assimp\lib\Debug\assimp.lib")"
+				R"(&& link /DLL /out:")"
+				<< currentProject->projectName << R"(\)" << comp.first << R"(.dll" ")"
+				<< currentProject->projectName << R"(\)" << comp.first << R"(.obj" ")"
+				<< currentProject->projectName << R"(\ComponentsEntry.obj")";
+			system(cmd.str().c_str());
+			comp.second = std::to_string(std::filesystem::last_write_time(currentProject->projectName + R"(\)" + comp.first + ".cpp").time_since_epoch().count());
+		}
+		std::string componentPath = currentProject->projectName + R"(\)";
+		componentPath += comp.first;
+		componentPath += R"(.dll)";
+		HINSTANCE hDll = LoadLibraryA(componentPath.c_str());
+		if (hDll)
+		{
+			loadedCustomComponents[comp.first] = hDll;
+		}
+		else
+		{
+			std::cout << "Unable to load component " << comp.first << std::endl;
+		}
+	}
+
+	for (auto& comp : loadedCustomComponents)
+	{
+		if (objectsWithCustomComponents.find(comp.first) != objectsWithCustomComponents.end())
+		{
+			reinterpret_cast<void(*)(SingletonManager*)>(GetProcAddress((HMODULE)comp.second, "_set_singleton_manager"))(SingletonManager::Instance());
+			for (auto& obj : objectsWithCustomComponents[comp.first])
+				reinterpret_cast<void(*)(GameObject*, const Json&)>(GetProcAddress((HMODULE)comp.second, "_add_comp"))(obj.first, obj.second);
+		}
 	}
 }
 void EngineEditor::BuildProject()
 {
+	if (!currentProject)
+		return;
+
 	SaveProject();
 	system(("CMake\\bin\\cmake --build \"" + currentProject->projectPath + "/build\"").c_str());
+	std::cout << "next" << std::endl;
 
 	std::filesystem::path assimpDll = "assimp-vc143-mtd.dll";
 	std::filesystem::path freetypeDll = "freetype.dll";
@@ -926,6 +1008,12 @@ void EngineEditor::BuildProject()
 		std::filesystem::copy(sourceDirectory, targetParent / sourceDirectory, std::filesystem::copy_options::overwrite_existing);
 		std::filesystem::copy_file(assimpDll, targetParent / assimpDll.filename(), std::filesystem::copy_options::overwrite_existing);
 		std::filesystem::copy_file(freetypeDll, targetParent / freetypeDll.filename(), std::filesystem::copy_options::overwrite_existing);
+		for (auto& customComponent : currentProject->customComponents)
+		{
+			std::filesystem::path compName = customComponent.first + ".dll";
+			std::filesystem::path compPath = currentProject->projectName + "/" + customComponent.first + ".dll";
+			std::filesystem::copy_file(compPath, targetParent / compName.filename(), std::filesystem::copy_options::overwrite_existing);
+		}
 		std::filesystem::copy_file(projectFile, targetParent / sourceDirectory / sceneFile.filename(), std::filesystem::copy_options::overwrite_existing);
 	}
 	catch (std::exception& e)
@@ -937,19 +1025,28 @@ void EngineEditor::BuildProject()
 	//if (buildAndOpen)
 	//	ShellExecuteA(NULL, "open", (currentProject->projectPath + "\\build\\Debug\\" + currentProject->projectName + ".exe").c_str(), NULL, NULL, SW_SHOW);
 }
+
 void EngineEditor::SaveProject()
 {
+	if (!currentProject)
+		return;
+
 	std::ofstream projectFile(currentProject->projectPath + "/" + currentProject->projectName + ".project");
 
 	//for (auto it = currentProject->customComponents.begin(); it != currentProject->customComponents.end(); it++)
 	//	projectFile << "";
 
 	Json scene;
-	for (auto it = ObjectsManager::instantiatedObjects.begin(); it != ObjectsManager::instantiatedObjects.end(); it++)
+	for (auto it = ObjectsManager->instantiatedObjects.begin(); it != ObjectsManager->instantiatedObjects.end(); it++)
 		if ((*it)->shouldBeSerialized)
 			scene["Scene"].push_back((*it)->Serialize());
 	for (auto it = currentProject->customComponents.begin(); it != currentProject->customComponents.end(); it++)
-		scene["Components"].push_back(*it);
+	{
+		Json comp;
+		comp["name"] = it->first;
+		comp["date"] = std::to_string(std::filesystem::last_write_time(currentProject->projectName + R"(\)" + it->first + ".cpp").time_since_epoch().count());
+		scene["Components"].push_back(comp);
+	}
 	projectFile << scene;
 }
 
@@ -1130,7 +1227,7 @@ bool EngineEditor::DrawComponentField(std::pair<const std::string, Json>& j, Jso
 				ImGui::SameLine();
 				if (ImGui::BeginCombo(label.c_str(), std::get<2>(fields[fieldIndex]).s))
 				{
-					for (auto& s : ResourceManager::loadedShaders)
+					for (auto& s : ResourceManager->loadedShaders)
 					{
 						if (ImGui::Selectable(s.first.c_str()))
 						{
@@ -1145,7 +1242,7 @@ bool EngineEditor::DrawComponentField(std::pair<const std::string, Json>& j, Jso
 				ImGui::SameLine();
 				if (ImGui::BeginCombo(label.c_str(), std::get<2>(fields[fieldIndex]).s))
 				{
-					for (auto& s : ResourceManager::loadedModels)
+					for (auto& s : ResourceManager->loadedModels)
 					{
 						if (ImGui::Selectable(s.first.c_str()))
 						{
@@ -1272,10 +1369,10 @@ bool EngineEditor::DrawComponentField(std::pair<const std::string, Json>& j, Jso
 void EngineEditor::CreateMainObjects()
 {
 	// creating camera
-	auto camera = ObjectsManager::Instantiate<CameraComponent>(Vector3(0, 0, -3));
+	auto camera = ObjectsManager->Instantiate<CameraComponent>(Vector3(0, 0, -3));
 	camera->gameObject->name = "Main Camera";
+	EventsController->SetAsMainCamera(camera);
 	EngineEditor::EnableObjectSerialization(camera->gameObject, false);
-	EventsController::SetAsMainCamera(camera);
 
 	// creating grid
 	std::vector<Vertex> vertices =
@@ -1289,9 +1386,9 @@ void EngineEditor::CreateMainObjects()
 		3, 4, 5
 	};
 	std::vector<Texture> textures = {};
-	ModelRendererComponent* grid = ObjectsManager::Instantiate<ModelRendererComponent>();
+	ModelRendererComponent* grid = ObjectsManager->Instantiate<ModelRendererComponent>();
 	grid->SetModel(new Model({ new Mesh(vertices, triangles, textures) }));
-	grid->SetShader(&ResourceManager::GetShader("Grid"));
+	grid->SetShader(&ResourceManager->GetShader("Grid"));
 	grid->useDepthBuffer = true;
 	EngineEditor::EnableObjectSerialization(grid->gameObject, false);
 }
@@ -1312,9 +1409,17 @@ void EngineEditor::ClearProject()
 {
 	if (currentProject)
 		delete currentProject;
-	while (!ObjectsManager::instantiatedObjects.empty())
-		ObjectsManager::DestroyObject(ObjectsManager::instantiatedObjects.front());
-	ObjectsManager::renderQueue.clear();
-	ObjectsManager::nextObjectID = 0;
-	GameObject::nextComponentID = 0;
+
+	while (!ObjectsManager->instantiatedObjects.empty())
+		ObjectsManager->DestroyObject(ObjectsManager->instantiatedObjects.front());
+
+	for (auto& comp : loadedCustomComponents)
+		FreeLibrary((HMODULE)comp.second);
+	loadedCustomComponents.clear();
+
+	ObjectsManager->renderQueue.clear();
+	ObjectsManager->nextObjectID = 0;
+	ObjectsManager->nextComponentID = 0;
+
+	selectedGameObject = nullptr;
 }
