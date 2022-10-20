@@ -14,7 +14,6 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-#include "EngineEditor.h"
 #include <Engine.h>
 #include <Initializer.h>
 #include <EventsController.h>
@@ -28,9 +27,12 @@
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
+#include "EngineCamera.h"
 
 EngineEditor::Project::ProjectState EngineEditor::Project::projectState;
 std::string EngineEditor::visualStudioVersion = "Visual Studio 17 2022";
+std::string EngineEditor::visualStudioCompilerPath;
+
 EngineEditor::Project* EngineEditor::currentProject = nullptr;
 char* EngineEditor::currentProjectPath = (char*)"";
 
@@ -54,6 +56,12 @@ std::map<std::string, const void*> EngineEditor::loadedCustomComponents;
 int EngineEditor::fieldIndex = -1;
 int EngineEditor::buttonIndex = 0;
 Json EngineEditor::serializedObject;
+
+Json EngineEditor::playSimulationSavedState;
+bool EngineEditor::simulationIsPlaying;
+
+ModelRendererComponent* EngineEditor::editorGridRenderer;
+ModelRendererComponent* EngineEditor::editorAxesRenderer;
 
 void EngineEditor::DrawMenuBar()
 {
@@ -96,10 +104,10 @@ void EngineEditor::DrawMenuBar()
 					for (int i = 0; i < 50; i++)
 						newComponentName[i] = 0;
 				}
-				if (ImGui::MenuItem("Update Components"))
+				/*if (ImGui::MenuItem("Update Components"))
 				{
 					UpdateComponents();
-				}
+				}*/
 				ImGui::EndMenu();
 			}
 			if (ImGui::BeginMenu("Build"))
@@ -152,6 +160,9 @@ void EngineEditor::DrawCreateProjectMenu()
 }
 void EngineEditor::DrawOpenedProjectMenu()
 {
+	if (!currentProject)
+		return;
+
 #pragma region ObjectsHierarchy
 	ImGui::SetNextWindowPos(ImVec2(0, 20));
 	ImGui::SetNextWindowSize(ImVec2(200,
@@ -166,8 +177,11 @@ void EngineEditor::DrawOpenedProjectMenu()
 		int objIndex = 0;
 		for (auto& obj : ObjectsManager->instantiatedObjects)
 		{
+			// change object's name color if it is inactive
+			ImGui::PushStyleColor(ImGuiCol_Text, obj->isActive ? IM_COL32(255, 255, 255, 255) : IM_COL32(150, 150, 150, 255));
 			if (obj->shouldBeSerialized && ImGui::Selectable((obj->name + "##" + std::to_string(objIndex++)).c_str(), false))
 			{
+				changeObjectName = false;
 				selectedGameObject = obj;
 				fields.clear();
 				serializedObject = Json();
@@ -176,6 +190,7 @@ void EngineEditor::DrawOpenedProjectMenu()
 				if (serializedObject.is_object())
 					GetComponentFields(serializedObject);
 			}
+			ImGui::PopStyleColor();
 		}
 		if (ImGui::Button("+"))
 		{
@@ -202,9 +217,10 @@ void EngineEditor::DrawOpenedProjectMenu()
 			ImGuiWindowFlags_NoCollapse | 
 			ImGuiWindowFlags_HorizontalScrollbar))
 		{
+			ImGui::Checkbox("##labelActive", &selectedGameObject->isActive); ImGui::SameLine();
 			ImGui::SetNextItemWidth(ImGui::GetWindowWidth() - 20);
 			if (ImGui::Selectable(selectedGameObject->name.c_str(), false, 0, 
-				ImVec2(ImGui::GetWindowWidth() - ImGui::CalcTextSize("Destroy").x - 30, 0)))
+				ImVec2(ImGui::GetWindowWidth() - ImGui::CalcTextSize("Destroy").x - 60, 0)))
 			{
 				changeObjectName = true;
 				for (int i = 0; i < 50; i++)
@@ -220,13 +236,17 @@ void EngineEditor::DrawOpenedProjectMenu()
 			}
 			else
 			{
-				fields.clear();
-				for (auto& comp : selectedGameObject->components)
-					comp.second->Serialize(serializedObject);
-				if (serializedObject.is_object())
-					GetComponentFields(serializedObject);
+				static bool addedNew = false;
+				if (!addedNew)
+				{
+					fields.clear();
+					for (auto& comp : selectedGameObject->components)
+						comp.second->Serialize(serializedObject);
+					if (serializedObject.is_object())
+						GetComponentFields(serializedObject);
+				}
 
-				bool addedNew = false;
+				addedNew = false;
 				fieldIndex = -1;
 				buttonIndex = 0;
 				ImGui::Unindent(16.f);
@@ -246,30 +266,28 @@ void EngineEditor::DrawOpenedProjectMenu()
 					for (auto& comp : selectedGameObject->components)
 						comp.second->Deserialize(serializedObject);
 				}
+				else
+				{
+					fields.clear();
+					if (serializedObject.is_object())
+						GetComponentFields(serializedObject);
+				}
 
 				ImGui::NewLine();
 				ImGui::SetNextItemWidth(ImGui::GetWindowWidth() - 20);
 				if (ImGui::BeginCombo("##labelAdd", "Add Component"))
 				{
+					if (ImGui::Selectable("Camera"))
+					{
+						selectedGameObject->AddComponent<CameraComponent>();
+					}
 					if (ImGui::Selectable("Line Renderer"))
 					{
 						selectedGameObject->AddComponent<LineRendererComponent>();
-						fields.clear();
-						serializedObject = Json();
-						for (auto& comp : selectedGameObject->components)
-							comp.second->Serialize(serializedObject);
-						if (serializedObject.is_object())
-							GetComponentFields(serializedObject);
 					}
 					if (ImGui::Selectable("Model Renderer"))
 					{
 						selectedGameObject->AddComponent<ModelRendererComponent>();
-						fields.clear();
-						serializedObject = Json();
-						for (auto& comp : selectedGameObject->components)
-							comp.second->Serialize(serializedObject);
-						if (serializedObject.is_object())
-							GetComponentFields(serializedObject);
 					}
 					for (auto& comp : currentProject->customComponents)
 					{
@@ -280,13 +298,6 @@ void EngineEditor::DrawOpenedProjectMenu()
 								reinterpret_cast<void(*)(GameObject*, const Json&)>
 									(GetProcAddress((HMODULE)loadedCustomComponents[comp.first], "_add_comp"))
 									(selectedGameObject, Json());
-
-								fields.clear();
-								serializedObject = Json();
-								for (auto& comp : selectedGameObject->components)
-									comp.second->Serialize(serializedObject);
-								if (serializedObject.is_object())
-									GetComponentFields(serializedObject);
 							}
 							else
 							{
@@ -320,6 +331,17 @@ void EngineEditor::DrawOpenedProjectMenu()
 			}
 		}
 		ImGui::End();
+
+		if (!simulationIsPlaying)
+		{
+			editorAxesRenderer->gameObject->isActive = true;
+			editorAxesRenderer->gameObject->transform->SetPosition(selectedGameObject->transform->GetPosition());
+			editorAxesRenderer->gameObject->transform->SetRotation(selectedGameObject->transform->GetRotation());
+		}
+	}
+	else
+	{
+		editorAxesRenderer->gameObject->isActive = false;
 	}
 #pragma endregion
 }
@@ -336,6 +358,9 @@ void EngineEditor::DrawLoadedAssetsMenu()
 
 bool EngineEditor::DrawUploadResourceMenu()
 {
+	if (!currentProject)
+		return false;
+
 	bool uploaded = false;
 	ImGui::SetNextWindowSize(ImVec2(300, 0));
 	if (ImGui::Begin("Upload Resource", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize))
@@ -422,6 +447,9 @@ bool EngineEditor::DrawUploadResourceMenu()
 }
 bool EngineEditor::DrawChangeObjectNameMenu()
 {
+	if (!currentProject || !selectedGameObject)
+		return false;
+
 	bool uploaded = false;
 	ImGui::SetNextWindowSize(ImVec2(300, 0));
 	if (ImGui::Begin("Rename Object", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize))
@@ -443,6 +471,9 @@ bool EngineEditor::DrawChangeObjectNameMenu()
 }
 bool EngineEditor::DrawCreateComponentMenu()
 {
+	if (!currentProject)
+		return false;
+
 	bool created = false;
 	ImGui::SetNextWindowSize(ImVec2(300, 0));
 	if (ImGui::Begin("Create Component", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize))
@@ -512,25 +543,28 @@ void EngineEditor::OpenProject()
 	currentProject->projectName = projectName.substr(0, projectName.find_last_of('.'));
 
 	std::ifstream projectFile(currentProject->projectPath + "/" + currentProject->projectName + ".project");
-	std::stringstream buffer;
-	buffer << projectFile.rdbuf();
+	std::ifstream configFile(currentProject->projectPath + "/" + currentProject->projectName + ".config");
+	std::stringstream saveBuffer, configBuffer;
+	saveBuffer << projectFile.rdbuf();
+	configBuffer << configFile.rdbuf();
 
 	try
 	{
-		Json projectFile = Json::parse(buffer.str());
+		Json saveFile = Json::parse(saveBuffer.str());
+		Json configFile = Json::parse(configBuffer.str());
 
-		Json components = projectFile["Components"];
+		Json components = configFile["Components"];
 		if (components.is_array())
 			for (auto& o : components.get<Json::array_t>())
 			{
 				std::string componentName = o["name"];
 				std::string lastWriteTime = o["date"];
-				currentProject->customComponents.push_back(std::make_pair(componentName, lastWriteTime));
 				if (std::to_string(std::filesystem::last_write_time(currentProject->projectName + R"(\)" + componentName + ".cpp").time_since_epoch().count())
 					!= lastWriteTime)
 				{
 					std::stringstream cmd;
-					cmd << R"(call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64 )"
+					//C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat
+					cmd << R"(call ")" << visualStudioCompilerPath << R"(" x64 )"
 						R"(&& cl /std:c++17 /EHsc /MDd "libraries\glad\src\glad.c" ")"
 						<< currentProject->projectName << R"(\ComponentsEntry.cpp" ")"
 						<< currentProject->projectName << R"(\)" << componentName << R"(.cpp" /Fo".\)"
@@ -549,10 +583,25 @@ void EngineEditor::OpenProject()
 						<< currentProject->projectName << R"(\)" << componentName << R"(.obj" ")"
 						<< currentProject->projectName << R"(\ComponentsEntry.obj")";
 					system(cmd.str().c_str());
+					lastWriteTime = std::to_string(std::filesystem::last_write_time(currentProject->projectName + R"(\)" + componentName + ".cpp").time_since_epoch().count());
+				}
+				currentProject->customComponents.push_back(std::make_pair(componentName, lastWriteTime));
+				std::string componentPath = currentProject->projectName + R"(\)";
+				componentPath += componentName;
+				componentPath += R"(.dll)";
+				HINSTANCE hDll = LoadLibraryA(componentPath.c_str());
+				if (hDll)
+				{
+					loadedCustomComponents[componentName] = hDll;
+					reinterpret_cast<void(*)(SingletonManager*)>(GetProcAddress(hDll, "_set_singleton_manager"))(SingletonManager::Instance());
+				}
+				else
+				{
+					std::cout << "Unable to load component " << componentName << std::endl;
 				}
 			}
 
-		Json scene = projectFile["Scene"];
+		Json scene = saveFile["Scene"];
 		if (scene.is_array())
 			for (auto& o : scene.get<Json::array_t>())
 			{
@@ -579,37 +628,23 @@ void EngineEditor::OpenProject()
 					}
 					else
 					{
-						if (loadedCustomComponents.find(componentName) == loadedCustomComponents.end())
+						if (loadedCustomComponents.find(componentName) != loadedCustomComponents.end())
 						{
-							std::string componentPath = currentProject->projectName + R"(\)";
-							componentPath += componentName;
-							componentPath += R"(.dll)";
-							HINSTANCE hDll = LoadLibraryA(componentPath.c_str());
-							if (hDll)
-							{
-								loadedCustomComponents[componentName] = hDll;
-								reinterpret_cast<void(*)(SingletonManager*)>(GetProcAddress(hDll, "_set_singleton_manager"))(SingletonManager::Instance());
-								reinterpret_cast<void(*)(GameObject*, const Json&)>(GetProcAddress(hDll, "_add_comp"))(obj, comp);
-							}
-							else
-							{
-								std::cout << "Unable to load component " << componentName << std::endl;
-							}
+							HINSTANCE hDll = (HINSTANCE)loadedCustomComponents[componentName];
+							reinterpret_cast<void(*)(SingletonManager*)>(GetProcAddress(hDll, "_set_singleton_manager"))(SingletonManager::Instance());
+							reinterpret_cast<void(*)(GameObject*, const Json&)>(GetProcAddress(hDll, "_add_comp"))(obj, comp);
 						}
 						else
 						{
-							reinterpret_cast<void(*)(GameObject*, const Json&)>
-								(GetProcAddress((HMODULE)loadedCustomComponents[componentName], "_add_comp"))
-								(obj, comp);
+							std::cout << "Unable to load component " << componentName << "." << std::endl;
 						}
 					}
 				}
 			}
-		//UpdateComponents();
 	}
 	catch (Json::parse_error)
 	{
-		std::cout << "Error with .project file, the project may be loaded incorrectly." << std::endl;
+		std::cout << "Error with .project or .config file, the project cannot be loaded." << std::endl;
 		delete currentProject;
 		currentProject = nullptr;
 
@@ -617,6 +652,17 @@ void EngineEditor::OpenProject()
 		Project::projectState = Project::ProjectState::None;
 		return;
 	}
+
+	Json config;
+	for (auto& it : currentProject->customComponents)
+	{
+		Json comp;
+		comp["name"] = it.first;
+		comp["date"] = std::to_string(std::filesystem::last_write_time(currentProject->projectName + R"(\)" + it.first + ".cpp").time_since_epoch().count());
+		config["Components"].push_back(comp);
+	}
+	std::ofstream(currentProject->projectPath + "/" + currentProject->projectName + ".config") << config;
+	projectFile.close();
 
 	std::string windowTitle = "Current project: " + currentProject->projectName;
 	glfwSetWindowTitle(InitializationHandler->GetWindow(), windowTitle.c_str());
@@ -641,6 +687,11 @@ void EngineEditor::CreateProject(std::string projectName)
 #include <iostream>
 #include <Singleton.h>
 
+#ifdef __gl_h_
+#undef __gl_h_
+#endif // __gl_h_
+#include <glad/glad.h>
+
 #pragma comment(lib, "opengl32.lib")
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -650,29 +701,29 @@ void EngineEditor::CreateProject(std::string projectName)
 #pragma comment(lib, "EngineLib.lib")
 
 BOOL APIENTRY DllMain(HMODULE hModule,
-    DWORD  ul_reason_for_call,
-    LPVOID lpReserved)
+	DWORD  ul_reason_for_call,
+	LPVOID lpReserved)
 {
-    switch (ul_reason_for_call)
-    {
-    case DLL_PROCESS_ATTACH:
-    case DLL_THREAD_ATTACH:
-    case DLL_THREAD_DETACH:
-    case DLL_PROCESS_DETACH:
-        break;
-    }
-    return TRUE;
+	switch (ul_reason_for_call)
+	{
+	case DLL_PROCESS_ATTACH:
+	case DLL_THREAD_ATTACH:
+	case DLL_THREAD_DETACH:
+	case DLL_PROCESS_DETACH:
+		break;
+	}
+	return TRUE;
 }
 
 INT WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
-    PSTR lpCmdLine, INT nCmdShow)
+	PSTR lpCmdLine, INT nCmdShow)
 {
-    return 0;
+	return 0;
 }
 
 extern "C" __declspec(dllexport) inline void _set_singleton_manager(SingletonManager* instance)
 {
-    SingletonManager::Instance() = instance;
+	SingletonManager::Instance() = instance;
 }
 )";
 
@@ -760,6 +811,7 @@ target_sources(${PROJECT_NAME} PRIVATE ${FILES_TO_ADD})
 
 	ResetProject();
 	CreateMainObjects();
+	SaveProject();
 	Project::projectState = Project::ProjectState::Opened;
 }
 void EngineEditor::CreateComponent(std::string componentName)
@@ -770,6 +822,11 @@ void EngineEditor::CreateComponent(std::string componentName)
 	std::ofstream componentFile(currentProject->projectPath + "/" + componentName + ".cpp");
 	componentFile << R"(
 #include <Engine.h>
+
+#ifdef __gl_h_
+#undef __gl_h_
+#endif // __gl_h_
+#include <glad/glad.h>
 
 extern "C"
 {
@@ -915,6 +972,8 @@ set(FILES_TO_ADD
 target_sources(${PROJECT_NAME} PRIVATE ${FILES_TO_ADD})
 )";
 	cmakeFile.close();
+
+	UpdateComponents();
 }
 void EngineEditor::UpdateComponents()
 {
@@ -942,7 +1001,8 @@ void EngineEditor::UpdateComponents()
 			!= comp.second)
 		{
 			std::stringstream cmd;
-			cmd << R"(call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64 )"
+			//C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat
+			cmd << R"(call ")" << visualStudioCompilerPath << R"(" x64 )"
 				R"(&& cl /std:c++17 /EHsc /MDd "libraries\glad\src\glad.c" ")"
 				<< currentProject->projectName << R"(\ComponentsEntry.cpp" ")"
 				<< currentProject->projectName << R"(\)" << comp.first << R"(.cpp" /Fo".\)"
@@ -986,6 +1046,17 @@ void EngineEditor::UpdateComponents()
 				reinterpret_cast<void(*)(GameObject*, const Json&)>(GetProcAddress((HMODULE)comp.second, "_add_comp"))(obj.first, obj.second);
 		}
 	}
+
+	std::ofstream projectConfigFile(currentProject->projectPath + "/" + currentProject->projectName + ".config");
+	Json configFile;
+	for (auto it = currentProject->customComponents.begin(); it != currentProject->customComponents.end(); it++)
+	{
+		Json comp;
+		comp["name"] = it->first;
+		comp["date"] = std::to_string(std::filesystem::last_write_time(currentProject->projectName + R"(\)" + it->first + ".cpp").time_since_epoch().count());
+		configFile["Components"].push_back(comp);
+	}
+	projectConfigFile << configFile;
 }
 void EngineEditor::BuildProject()
 {
@@ -994,12 +1065,13 @@ void EngineEditor::BuildProject()
 
 	SaveProject();
 	system(("CMake\\bin\\cmake --build \"" + currentProject->projectPath + "/build\"").c_str());
-	std::cout << "next" << std::endl;
 
 	std::filesystem::path assimpDll = "assimp-vc143-mtd.dll";
 	std::filesystem::path freetypeDll = "freetype.dll";
+
 	std::filesystem::path projectFile = currentProject->projectName + "/" + currentProject->projectName + ".project";
-	std::filesystem::path sceneFile = "MainScene.scene";
+	std::filesystem::path projectConfigFile = currentProject->projectName + "/" + currentProject->projectName + ".config";
+
 	std::filesystem::path targetParent = (currentProject->projectPath + "/build/Debug").c_str();
 	std::filesystem::path sourceDirectory = "source";
 	try
@@ -1014,7 +1086,8 @@ void EngineEditor::BuildProject()
 			std::filesystem::path compPath = currentProject->projectName + "/" + customComponent.first + ".dll";
 			std::filesystem::copy_file(compPath, targetParent / compName.filename(), std::filesystem::copy_options::overwrite_existing);
 		}
-		std::filesystem::copy_file(projectFile, targetParent / sourceDirectory / sceneFile.filename(), std::filesystem::copy_options::overwrite_existing);
+		std::filesystem::copy_file(projectFile, targetParent / sourceDirectory / "MainScene.scene", std::filesystem::copy_options::overwrite_existing);
+		std::filesystem::copy_file(projectConfigFile, targetParent / sourceDirectory / "components.config", std::filesystem::copy_options::overwrite_existing);
 	}
 	catch (std::exception& e)
 	{
@@ -1032,24 +1105,94 @@ void EngineEditor::SaveProject()
 		return;
 
 	std::ofstream projectFile(currentProject->projectPath + "/" + currentProject->projectName + ".project");
-
-	//for (auto it = currentProject->customComponents.begin(); it != currentProject->customComponents.end(); it++)
-	//	projectFile << "";
-
-	Json scene;
+	Json saveFile;
 	for (auto it = ObjectsManager->instantiatedObjects.begin(); it != ObjectsManager->instantiatedObjects.end(); it++)
 		if ((*it)->shouldBeSerialized)
-			scene["Scene"].push_back((*it)->Serialize());
-	for (auto it = currentProject->customComponents.begin(); it != currentProject->customComponents.end(); it++)
+			saveFile["Scene"].push_back((*it)->Serialize());
+	projectFile << saveFile;
+
+	std::ofstream projectConfigFile(currentProject->projectPath + "/" + currentProject->projectName + ".config");
+	Json configFile;
+	for (auto& it : currentProject->customComponents)
 	{
 		Json comp;
-		comp["name"] = it->first;
-		comp["date"] = std::to_string(std::filesystem::last_write_time(currentProject->projectName + R"(\)" + it->first + ".cpp").time_since_epoch().count());
-		scene["Components"].push_back(comp);
+		comp["name"] = it.first;
+		comp["date"] = std::to_string(std::filesystem::last_write_time(currentProject->projectName + R"(\)" + it.first + ".cpp").time_since_epoch().count());
+		configFile["Components"].push_back(comp);
 	}
-	projectFile << scene;
+	// save shaders and models with paths
+	/*for (auto& shader : ResourceManager->loadedShaders)
+	{
+
+	}*/
+	projectConfigFile << configFile;
 }
 
+void EngineEditor::SetEditorCallbacks()
+{
+	GLFWwindow* window = InitializationHandler->GetWindow();
+	glfwSetWindowFocusCallback(window,
+		[](GLFWwindow* window, int focused)
+		{
+			if (focused && !simulationIsPlaying)
+				UpdateComponents();
+		});
+	EventSystem->onUpdateEditor.push_back(
+		[]()
+		{
+			if (EditorCamera::camera && !simulationIsPlaying)
+				EditorCamera::OnUpdate();
+		});
+	EventSystem->onMouseMoveEventEditor.push_back(
+		[](GLFWwindow* window, double x, double y, Vector2 motion)
+		{
+			if (EditorCamera::camera && !simulationIsPlaying)
+				EditorCamera::OnMouseMove(x, y);
+		});
+	EventSystem->onMouseWheelEventEditor.push_back(
+		[](GLFWwindow* window, double xoffset, double yoffset)
+		{
+			if (EditorCamera::camera && !simulationIsPlaying)
+				EditorCamera::OnMouseWheel(xoffset, yoffset);
+		});
+}
+void EngineEditor::SetCompilerPath()
+{
+	// open or create configuration file
+	std::fstream configurationFile;
+	configurationFile.open(std::filesystem::current_path().string() + "\\engine.config", std::fstream::in | std::fstream::out);
+	if (!configurationFile)
+		configurationFile.open(std::filesystem::current_path().string() + "\\engine.config", std::fstream::in | std::fstream::out | std::fstream::trunc);
+
+	std::stringstream buffer;
+	buffer << configurationFile.rdbuf();
+
+	Json config;
+	try
+	{
+		config = Json::parse(buffer.str());
+		if (config.contains("compiler"))
+			visualStudioCompilerPath = config["compiler"];
+		if (config.contains("version"))
+			visualStudioVersion = config["version"];
+	}
+	catch (Json::parse_error)
+	{
+		char* compilerPath;
+		if (NFD_OpenDialog("bat", "C:\\Program Files", &compilerPath) == nfdresult_t::NFD_OKAY)
+		{
+			config["compiler"] = visualStudioCompilerPath = compilerPath;
+			configurationFile << config;
+		}
+		else
+		{
+			visualStudioCompilerPath = std::string();
+			std::cout << "Visual Studio compiler is not set." << std::endl;
+		}
+		visualStudioVersion = "Visual Studio 17 2022";
+	}
+	configurationFile.close();
+}
 void EngineEditor::EnableObjectSerialization(GameObject* obj, bool enable)
 {
 	obj->shouldBeSerialized = enable;
@@ -1179,15 +1322,45 @@ bool EngineEditor::DrawComponentField(std::pair<const std::string, Json>& j, Jso
 	case Json::value_t::number_integer:
 	{
 		if (!shouldBeDrawn) break;
-		ImGui::Text(ss.str().substr(0, 20).c_str()); ImGui::SameLine();
-		ImGui::InputInt(label.c_str(), &std::get<2>(fields[fieldIndex]).i);
+
+		size_t attributeStart, attributeEnd;
+		if ((attributeStart = ss.str().find_first_of('[')) != std::string::npos &&
+			(attributeEnd	= ss.str().find_first_of(']')) != std::string::npos)
+		{
+			std::string attribute = ss.str().substr(attributeStart + 1, attributeEnd - attributeStart - 1);
+			if (attribute != "hide")
+			{
+				ImGui::Text(ss.str().substr(attributeEnd + 1, 20).c_str()); ImGui::SameLine();
+				ImGui::InputInt(label.c_str(), &std::get<2>(fields[fieldIndex]).i);
+			}
+		}
+		else
+		{
+			ImGui::Text(ss.str().substr(0, 20).c_str()); ImGui::SameLine();
+			ImGui::InputInt(label.c_str(), &std::get<2>(fields[fieldIndex]).i);
+		}
 		break;
 	}
 	case Json::value_t::number_float:
 	{
 		if (!shouldBeDrawn) break;
-		ImGui::Text(ss.str().substr(0, 20).c_str()); ImGui::SameLine();
-		ImGui::InputFloat(label.c_str(), &std::get<2>(fields[fieldIndex]).f, 0.f, 0.f, "%.8f");
+
+		size_t attributeStart, attributeEnd;
+		if ((attributeStart = ss.str().find_first_of('[')) != std::string::npos &&
+			(attributeEnd	= ss.str().find_first_of(']')) != std::string::npos)
+		{
+			std::string attribute = ss.str().substr(attributeStart + 1, attributeEnd - attributeStart - 1);
+			if (attribute != "hide")
+			{
+				ImGui::Text(ss.str().substr(attributeEnd + 1, 20).c_str()); ImGui::SameLine();
+				ImGui::InputFloat(label.c_str(), &std::get<2>(fields[fieldIndex]).f, 0.f, 0.f, "%.8f");
+			}
+		}
+		else
+		{
+			ImGui::Text(ss.str().substr(0, 20).c_str()); ImGui::SameLine();
+			ImGui::InputFloat(label.c_str(), &std::get<2>(fields[fieldIndex]).f, 0.f, 0.f, "%.8f");
+		}
 		break;
 	}
 	case Json::value_t::boolean:
@@ -1196,7 +1369,7 @@ bool EngineEditor::DrawComponentField(std::pair<const std::string, Json>& j, Jso
 
 		size_t attributeStart, attributeEnd;
 		if ((attributeStart = ss.str().find_first_of('[')) != std::string::npos &&
-			(attributeEnd = ss.str().find_first_of(']')) != std::string::npos)
+			(attributeEnd	= ss.str().find_first_of(']')) != std::string::npos)
 		{
 			std::string attribute = ss.str().substr(attributeStart + 1, attributeEnd - attributeStart - 1);
 			if (attribute != "hide")
@@ -1220,11 +1393,10 @@ bool EngineEditor::DrawComponentField(std::pair<const std::string, Json>& j, Jso
 		if ((attributeStart = ss.str().find_first_of('[')) != std::string::npos &&
 			(attributeEnd	= ss.str().find_first_of(']')) != std::string::npos)
 		{
-			ImGui::Text(ss.str().substr(attributeEnd + 1, 20).c_str());
 			std::string attribute = ss.str().substr(attributeStart + 1, attributeEnd - attributeStart - 1);
 			if (attribute == "shader")
 			{
-				ImGui::SameLine();
+				ImGui::Text(ss.str().substr(attributeEnd + 1, 20).c_str()); ImGui::SameLine();
 				if (ImGui::BeginCombo(label.c_str(), std::get<2>(fields[fieldIndex]).s))
 				{
 					for (auto& s : ResourceManager->loadedShaders)
@@ -1239,7 +1411,7 @@ bool EngineEditor::DrawComponentField(std::pair<const std::string, Json>& j, Jso
 			}
 			else if (attribute == "model")
 			{
-				ImGui::SameLine();
+				ImGui::Text(ss.str().substr(attributeEnd + 1, 20).c_str()); ImGui::SameLine();
 				if (ImGui::BeginCombo(label.c_str(), std::get<2>(fields[fieldIndex]).s))
 				{
 					for (auto& s : ResourceManager->loadedModels)
@@ -1251,6 +1423,11 @@ bool EngineEditor::DrawComponentField(std::pair<const std::string, Json>& j, Jso
 					}
 					ImGui::EndCombo();
 				}
+			}
+			else if (attribute != "hide")
+			{
+				ImGui::Text(ss.str().substr(attributeEnd + 1, 20).c_str()); ImGui::SameLine();
+				ImGui::InputText(label.c_str(), std::get<2>(fields[fieldIndex]).s, 50);
 			}
 		}
 		else
@@ -1266,7 +1443,13 @@ bool EngineEditor::DrawComponentField(std::pair<const std::string, Json>& j, Jso
 		std::string header = j.first;
 		header += "###";
 		header += std::to_string(fieldIndex);
-		if (shouldBeDrawn && ImGui::CollapsingHeader(header.c_str()))
+
+		size_t attributeStart, attributeEnd;
+		std::string attribute;
+		if ((attributeStart = ss.str().find_first_of('[')) != std::string::npos &&
+			(attributeEnd = ss.str().find_first_of(']')) != std::string::npos)
+			attribute = ss.str().substr(attributeStart + 1, attributeEnd - attributeStart - 1);
+		if (shouldBeDrawn && attribute != "hide" && ImGui::CollapsingHeader(header.c_str()))
 		{
 			for (auto& field : j.second.get<Json::array_t>())
 			{
@@ -1337,7 +1520,13 @@ bool EngineEditor::DrawComponentField(std::pair<const std::string, Json>& j, Jso
 		std::string header = j.first;
 		header += "##";
 		header += std::to_string(fieldIndex);
-		if (shouldBeDrawn && ImGui::CollapsingHeader(header.c_str()))
+
+		size_t attributeStart, attributeEnd;
+		std::string attribute;
+		if ((attributeStart = ss.str().find_first_of('[')) != std::string::npos &&
+			(attributeEnd = ss.str().find_first_of(']')) != std::string::npos)
+			attribute = ss.str().substr(attributeStart + 1, attributeEnd - attributeStart - 1);
+		if (shouldBeDrawn && attribute != "hide" && ImGui::CollapsingHeader(header.c_str()))
 		{
 			for (auto& field : j.second.get<Json::object_t>())
 				if (DrawComponentField(field, j.second, true))
@@ -1368,11 +1557,16 @@ bool EngineEditor::DrawComponentField(std::pair<const std::string, Json>& j, Jso
 
 void EngineEditor::CreateMainObjects()
 {
+	if (!currentProject)
+		return;
+
 	// creating camera
-	auto camera = ObjectsManager->Instantiate<CameraComponent>(Vector3(0, 0, -3));
-	camera->gameObject->name = "Main Camera";
-	EventsController->SetAsMainCamera(camera);
-	EngineEditor::EnableObjectSerialization(camera->gameObject, false);
+	EditorCamera::camera = ObjectsManager->Instantiate<CameraComponent>(Vector3(-2, 1, -2));
+	EditorCamera::cameraTransform = EditorCamera::camera->gameObject->transform;
+	EditorCamera::camera->gameObject->name = "Editor Camera";
+	EditorCamera::OnCreate();
+	EventsController->SetAsMainCamera(EditorCamera::camera);
+	EngineEditor::EnableObjectSerialization(EditorCamera::camera->gameObject, false);
 
 	// creating grid
 	std::vector<Vertex> vertices =
@@ -1386,11 +1580,36 @@ void EngineEditor::CreateMainObjects()
 		3, 4, 5
 	};
 	std::vector<Texture> textures = {};
-	ModelRendererComponent* grid = ObjectsManager->Instantiate<ModelRendererComponent>();
-	grid->SetModel(new Model({ new Mesh(vertices, triangles, textures) }));
-	grid->SetShader(&ResourceManager->GetShader("Grid"));
-	grid->useDepthBuffer = true;
-	EngineEditor::EnableObjectSerialization(grid->gameObject, false);
+	editorGridRenderer = ObjectsManager->Instantiate<ModelRendererComponent>();
+	editorGridRenderer->SetModel(new Model({ new Mesh(vertices, triangles, textures) }));
+	editorGridRenderer->SetShader(&ResourceManager->GetShader("Grid"));
+	editorGridRenderer->gameObject->name = "Grid Renderer";
+	editorGridRenderer->useDepthBuffer = true;
+	EngineEditor::EnableObjectSerialization(editorGridRenderer->gameObject, false);
+
+	// creating grid
+	vertices =
+	{
+		Vector3(0), Vector3(0),
+		Vector3(0), Vector3(0),
+		Vector3(0), Vector3(0),
+	};
+	triangles =
+	{
+		0, 1, 
+		2, 3, 
+		4, 5,
+	};
+	textures = {};
+	editorAxesRenderer = ObjectsManager->Instantiate<ModelRendererComponent>();
+	Mesh* axesMesh = new Mesh(vertices, triangles, textures);
+	axesMesh->wireframeWidth = 3;
+	axesMesh->SetDrawMode(Mesh::DrawMode::Wireframe);
+	editorAxesRenderer->SetModel(new Model({ axesMesh }));
+	editorAxesRenderer->SetShader(&ResourceManager->GetShader("Axis"));
+	editorAxesRenderer->gameObject->name = "Axis";
+	EngineEditor::EnableObjectSerialization(editorAxesRenderer->gameObject, false);
+	editorAxesRenderer->gameObject->isActive = false;
 }
 void EngineEditor::ResetProject()
 {
@@ -1422,4 +1641,155 @@ void EngineEditor::ClearProject()
 	ObjectsManager->nextComponentID = 0;
 
 	selectedGameObject = nullptr;
+}
+
+void EngineEditor::BeginPlaySimulation()
+{
+	if (!currentProject || simulationIsPlaying)
+		return;
+
+	playSimulationSavedState.clear();
+	for (auto it = ObjectsManager->instantiatedObjects.begin(); it != ObjectsManager->instantiatedObjects.end(); it++)
+		if ((*it)->shouldBeSerialized)
+			playSimulationSavedState["Scene"].push_back((*it)->Serialize());
+
+	EventsController->SetPlayMode(simulationIsPlaying = true);
+
+	editorGridRenderer->gameObject->isActive = false;
+	editorAxesRenderer->gameObject->isActive = false;
+	EditorCamera::camera->gameObject->isActive = false;
+
+	Screen->SetCursorVisibility(true);
+	EventsController->SetAsMainCamera(ObjectsManager->FindObjectOfType<CameraComponent>());
+	for (auto it = ObjectsManager->instantiatedObjects.begin(); it != ObjectsManager->instantiatedObjects.end(); it++)
+		if ((*it)->isActive)
+			for (auto& comp : (*it)->components)
+				comp.second->OnCreate();
+}
+void EngineEditor::EndPlaySimulation()
+{
+	if (!currentProject || !simulationIsPlaying)
+		return;
+
+	EventsController->SetPlayMode(simulationIsPlaying = false);
+
+	{
+		auto it = ObjectsManager->instantiatedObjects.begin();
+		while (it != ObjectsManager->instantiatedObjects.end())
+		{
+			GameObject* go = *it;
+			// do not destroy editor camera and grid renderer etc
+			if ((*it)->shouldBeSerialized)
+			{
+				// copy-paste of ObjectsManager::DestroyObject function
+				delete* it;
+				it = ObjectsManager->instantiatedObjects.erase(it);
+			}
+			else ++it;
+		}
+	}
+	/*while (!ObjectsManager->instantiatedObjects.empty())
+		ObjectsManager->DestroyObject(ObjectsManager->instantiatedObjects.front());*/
+
+	for (auto& comp : loadedCustomComponents)
+		FreeLibrary((HMODULE)comp.second);
+	loadedCustomComponents.clear();
+
+	{
+		auto it = ObjectsManager->renderQueue.begin();
+		while (it != ObjectsManager->renderQueue.end())
+			if ((*it)->gameObject->shouldBeSerialized)
+				it = ObjectsManager->renderQueue.erase(it);
+			else ++it;
+	}
+	ObjectsManager->nextObjectID = 0;
+	ObjectsManager->nextComponentID = 0;
+	selectedGameObject = nullptr;
+
+	Json scene = playSimulationSavedState["Scene"];
+	if (scene.is_array())
+		for (auto& o : scene.get<Json::array_t>())
+		{
+			GameObject* obj = ObjectsManager->Instantiate();
+			obj->name = o.begin().key();
+			for (auto& comp : o.begin().value().get<Json::array_t>())
+			{
+				std::string componentName = comp.begin().key();
+				if (componentName == "Transform")
+				{
+					obj->AddComponent<TransformComponent>()->Deserialize(comp);
+				}
+				else if (componentName == "Camera")
+				{
+					obj->AddComponent<CameraComponent>()->Deserialize(comp);
+				}
+				else if (componentName == "Model Renderer")
+				{
+					obj->AddComponent<ModelRendererComponent>()->Deserialize(comp);
+				}
+				else if (componentName == "Line Renderer")
+				{
+					obj->AddComponent<LineRendererComponent>()->Deserialize(comp);
+				}
+				else
+				{
+					if (loadedCustomComponents.find(componentName) == loadedCustomComponents.end())
+					{
+						std::string componentPath = currentProject->projectName + R"(\)";
+						componentPath += componentName;
+						componentPath += R"(.dll)";
+						HINSTANCE hDll = LoadLibraryA(componentPath.c_str());
+						if (hDll)
+						{
+							loadedCustomComponents[componentName] = hDll;
+							reinterpret_cast<void(*)(SingletonManager*)>(GetProcAddress(hDll, "_set_singleton_manager"))(SingletonManager::Instance());
+							reinterpret_cast<void(*)(GameObject*, const Json&)>(GetProcAddress(hDll, "_add_comp"))(obj, comp);
+						}
+						else
+						{
+							std::cout << "Unable to load component " << componentName << std::endl;
+						}
+					}
+					else
+					{
+						reinterpret_cast<void(*)(GameObject*, const Json&)>
+							(GetProcAddress((HMODULE)loadedCustomComponents[componentName], "_add_comp"))
+							(obj, comp);
+					}
+				}
+			}
+		}
+
+	editorGridRenderer->gameObject->isActive = true;
+	editorAxesRenderer->gameObject->isActive = true;
+	EditorCamera::camera->gameObject->isActive = true;
+	EventsController->SetAsMainCamera(EditorCamera::camera);
+}
+void EngineEditor::PlaySimulation(bool play)
+{
+	play ? BeginPlaySimulation() : EndPlaySimulation();
+}
+bool EngineEditor::SimulationIsPlaying()
+{
+	return simulationIsPlaying;
+}
+
+void EngineEditor::HandleEditorShortcuts()
+{
+	if (EventSystem->GetKey(GLFW_KEY_LEFT_CONTROL))
+	{
+		if (EventSystem->GetKeyClick(GLFW_KEY_S))
+			EngineEditor::SaveProject();
+	}
+
+	if (EventSystem->GetKeyClick(GLFW_KEY_E))
+	{
+		EngineEditor::PlaySimulation(!EngineEditor::SimulationIsPlaying());
+	}
+}
+void EngineEditor::CheckTextInputActive()
+{
+	EventsController->enableMouseWheelEvent = 
+		EventsController->enableKeyboardEvent = 
+		!ImGui::GetIO().WantCaptureKeyboard;
 }

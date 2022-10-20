@@ -1,13 +1,14 @@
 #pragma once
 #include <string>
 #include <vector>
-//#include <windows.h>
 
 #include <nlohmann/json.hpp>
 using Json = nlohmann::json;
 
 class GameObject;
 class Component;
+class CameraComponent;
+class ModelRendererComponent;
 class EngineEditor final
 {
 	EngineEditor() = delete;
@@ -34,6 +35,7 @@ class EngineEditor final
 		char* s = new char[50];
 	};
 	static std::string visualStudioVersion;
+	static std::string visualStudioCompilerPath;
 	static Project* currentProject;
 	static char* currentProjectPath;
 
@@ -58,6 +60,12 @@ class EngineEditor final
 	static int buttonIndex;
 	static Json serializedObject;
 
+	static Json playSimulationSavedState;
+	static bool simulationIsPlaying;
+
+	static ModelRendererComponent* editorGridRenderer;
+	static ModelRendererComponent* editorAxesRenderer;
+
 	static void DrawMenuBar();
 	static void DrawCreateProjectMenu();
 	static void DrawOpenedProjectMenu();
@@ -74,6 +82,9 @@ class EngineEditor final
 	static void ClearProject();
 	static void ResetProject();
 	static void CreateMainObjects();
+
+	static void BeginPlaySimulation();
+	static void EndPlaySimulation();
 public:
 	static void DrawEngineMenu();
 
@@ -84,5 +95,13 @@ public:
 	static void SaveProject();
 	static void BuildProject();
 
+	static void SetEditorCallbacks();
+	static void SetCompilerPath();
 	static void EnableObjectSerialization(GameObject* obj, bool enable);
+
+	static void PlaySimulation(bool play);
+	static bool SimulationIsPlaying();
+
+	static void HandleEditorShortcuts();
+	static void CheckTextInputActive();
 };
