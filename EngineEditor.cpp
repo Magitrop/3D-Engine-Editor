@@ -5,12 +5,13 @@
 #endif // __gl_h_
 #include <glad/glad.h>
 
+#include <thread>
+
 #include <windows.h>
 #include <fstream>
 #include <filesystem>
 #include <sstream>
 
-#include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -40,6 +41,9 @@ GameObject* EngineEditor::selectedGameObject;
 std::vector<std::tuple<std::string, Json::value_t, EngineEditor::FieldData>> EngineEditor::fields;
 
 bool EngineEditor::uploadResource;
+std::vector<std::string> EngineEditor::uploadingResources;
+std::mutex EngineEditor::uploadingResourcesMutex;
+std::vector<std::pair<Model*, GLFWwindow*>> EngineEditor::pendingLoadedModels;
 char* EngineEditor::vertexShaderPath = (char*)"";
 char* EngineEditor::fragmentShaderPath = (char*)"";
 char EngineEditor::shaderName[50]{};
@@ -71,12 +75,12 @@ void EngineEditor::DrawMenuBar()
 		{
 			if (ImGui::MenuItem("New project"))
 			{
+				createComponent = changeObjectName = uploadResource = false;
 				Project::projectState = Project::ProjectState::Create;
 			}
 			if (ImGui::MenuItem("Open project"))
 			{
 				OpenProject();
-				//Project::projectState = Project::ProjectState::Open;
 			}
 			if (currentProject && ImGui::MenuItem("Save"))
 			{
@@ -91,6 +95,8 @@ void EngineEditor::DrawMenuBar()
 				if (ImGui::MenuItem("Upload New Resource"))
 				{
 					uploadResource = true;
+					changeObjectName = false;
+					createComponent = false;
 
 					for (int i = 0; i < 50; i++)
 						shaderName[i] = modelName[i] = 0;
@@ -100,14 +106,12 @@ void EngineEditor::DrawMenuBar()
 				if (ImGui::MenuItem("Create Component"))
 				{
 					createComponent = true;
+					changeObjectName = false;
+					uploadResource = false;
 
 					for (int i = 0; i < 50; i++)
 						newComponentName[i] = 0;
 				}
-				/*if (ImGui::MenuItem("Update Components"))
-				{
-					UpdateComponents();
-				}*/
 				ImGui::EndMenu();
 			}
 			if (ImGui::BeginMenu("Build"))
@@ -203,6 +207,13 @@ void EngineEditor::DrawOpenedProjectMenu()
 #pragma region ObjectProperties
 	if (selectedGameObject != nullptr)
 	{
+		if (!simulationIsPlaying)
+		{
+			editorAxesRenderer->gameObject->isActive = true;
+			editorAxesRenderer->gameObject->transform->SetPosition(selectedGameObject->transform->GetPosition());
+			editorAxesRenderer->gameObject->transform->SetRotation(selectedGameObject->transform->GetRotation());
+		}
+
 		ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x - 400, 20));
 		ImGui::SetNextWindowSizeConstraints(ImVec2(400, 0), ImVec2(400, 
 			ImGui::GetIO().DisplaySize.y
@@ -331,13 +342,6 @@ void EngineEditor::DrawOpenedProjectMenu()
 			}
 		}
 		ImGui::End();
-
-		if (!simulationIsPlaying)
-		{
-			editorAxesRenderer->gameObject->isActive = true;
-			editorAxesRenderer->gameObject->transform->SetPosition(selectedGameObject->transform->GetPosition());
-			editorAxesRenderer->gameObject->transform->SetRotation(selectedGameObject->transform->GetRotation());
-		}
 	}
 	else
 	{
@@ -402,7 +406,22 @@ bool EngineEditor::DrawUploadResourceMenu()
 					std::string(fragmentShaderPath).size() > 0 &&
 					std::string(shaderName).size() > 0)
 				{
-					ResourceManager->UploadShader(Shader(vertexShaderPath, fragmentShaderPath), shaderName);
+					std::thread uploadShaderThread(
+						[&]()
+						{
+							// locking queue in order to add new resource name
+							uploadingResourcesMutex.lock();
+							auto it = uploadingResources.insert(uploadingResources.begin(), shaderName);
+							uploadingResourcesMutex.unlock();
+
+							ResourceManager->UploadShader(new Shader(vertexShaderPath, fragmentShaderPath), shaderName);
+
+							// locking queue in order to delete resource name
+							uploadingResourcesMutex.lock();
+							uploadingResources.erase(it);
+							uploadingResourcesMutex.unlock();
+						});
+					uploadShaderThread.detach();
 					uploaded = true;
 				}
 				ImGui::SameLine();
@@ -412,9 +431,9 @@ bool EngineEditor::DrawUploadResourceMenu()
 			}
 			if (ImGui::BeginTabItem("Model"))
 			{
+				static std::string fileName = "none";
 				if (ImGui::CollapsingHeader("Model"))
 				{
-					static std::string fileName = "none";
 					ImGui::Indent(16.f);
 					if (ImGui::Button("Select##model"))
 					{
@@ -431,7 +450,28 @@ bool EngineEditor::DrawUploadResourceMenu()
 					std::string(modelPath).size() > 0 &&
 					std::string(modelName).size() > 0)
 				{
-					ResourceManager->UploadModel(Model(modelPath), modelName);
+					glfwWindowHint(GLFW_VISIBLE, GL_FALSE);
+					auto window = glfwCreateWindow(1, 1, "Loading", nullptr, InitializationHandler->GetWindow());
+					glfwWindowHint(GLFW_VISIBLE, GL_TRUE);
+					std::thread uploadModelThread(
+						[&, window]() 
+						{
+							std::string visibleName = std::string(modelName) + " (" + fileName + ")";
+
+							// locking queue in order to add new resource name
+							uploadingResourcesMutex.lock();
+							uploadingResources.push_back(visibleName);
+							uploadingResourcesMutex.unlock();
+
+							glfwMakeContextCurrent(window);
+							pendingLoadedModels.push_back(std::make_pair(new Model(modelPath), window));
+
+							// locking queue in order to delete resource name
+							uploadingResourcesMutex.lock();
+							uploadingResources.erase(std::find(uploadingResources.begin(), uploadingResources.end(), visibleName));
+							uploadingResourcesMutex.unlock();
+						});
+					uploadModelThread.detach();
 					uploaded = true;
 				}
 				ImGui::SameLine();
@@ -445,6 +485,42 @@ bool EngineEditor::DrawUploadResourceMenu()
 	ImGui::End();
 	return uploaded;
 }
+void EngineEditor::DrawLoadingResourcesQueue()
+{
+	int index = 1;
+	for (auto& r : uploadingResources)
+	{
+		ImGui::SetNextWindowPos(ImVec2(ImGui::GetIO().DisplaySize.x - 250, ImGui::GetIO().DisplaySize.y - 30 * index));
+		ImGui::SetNextWindowSize(ImVec2(250, 30));
+		std::string windowName = "##labelUploading";
+		windowName += index;
+		if (ImGui::Begin(windowName.c_str(), nullptr,
+			ImGuiWindowFlags_NoResize | 
+			ImGuiWindowFlags_AlwaysAutoResize | 
+			ImGuiWindowFlags_NoCollapse | 
+			ImGuiWindowFlags_NoMove |
+			ImGuiWindowFlags_NoTitleBar))
+		{
+			std::string label = "Loading " + r + "...";
+			ImGui::Text(label.c_str());
+		}
+		ImGui::End();
+		index++;
+	}
+}
+void EngineEditor::IteratePendingLoadedModels()
+{
+	auto it = pendingLoadedModels.begin();
+	while (it != pendingLoadedModels.end())
+	{
+		for (auto& mesh : it->first->meshes)
+			mesh->SetupMesh();
+		ResourceManager->UploadModel(it->first, modelName);
+		glfwDestroyWindow(it->second);
+		it = pendingLoadedModels.erase(it);
+	}
+}
+
 bool EngineEditor::DrawChangeObjectNameMenu()
 {
 	if (!currentProject || !selectedGameObject)
@@ -524,6 +600,8 @@ void EngineEditor::DrawEngineMenu()
 		DrawOpenedProjectMenu();
 		break;
 	}
+	DrawLoadingResourcesQueue();
+	IteratePendingLoadedModels();
 
 	ImGui::Render();
 	ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -582,8 +660,8 @@ void EngineEditor::OpenProject()
 						<< currentProject->projectName << R"(\)" << componentName << R"(.dll" ")"
 						<< currentProject->projectName << R"(\)" << componentName << R"(.obj" ")"
 						<< currentProject->projectName << R"(\ComponentsEntry.obj")";
-					system(cmd.str().c_str());
-					lastWriteTime = std::to_string(std::filesystem::last_write_time(currentProject->projectName + R"(\)" + componentName + ".cpp").time_since_epoch().count());
+					if (!system(cmd.str().c_str()))
+						lastWriteTime = std::to_string(std::filesystem::last_write_time(currentProject->projectName + R"(\)" + componentName + ".cpp").time_since_epoch().count());
 				}
 				currentProject->customComponents.push_back(std::make_pair(componentName, lastWriteTime));
 				std::string componentPath = currentProject->projectName + R"(\)";
@@ -1020,8 +1098,8 @@ void EngineEditor::UpdateComponents()
 				<< currentProject->projectName << R"(\)" << comp.first << R"(.dll" ")"
 				<< currentProject->projectName << R"(\)" << comp.first << R"(.obj" ")"
 				<< currentProject->projectName << R"(\ComponentsEntry.obj")";
-			system(cmd.str().c_str());
-			comp.second = std::to_string(std::filesystem::last_write_time(currentProject->projectName + R"(\)" + comp.first + ".cpp").time_since_epoch().count());
+			if (!system(cmd.str().c_str()))
+				comp.second = std::to_string(std::filesystem::last_write_time(currentProject->projectName + R"(\)" + comp.first + ".cpp").time_since_epoch().count());
 		}
 		std::string componentPath = currentProject->projectName + R"(\)";
 		componentPath += comp.first;
@@ -1582,12 +1660,12 @@ void EngineEditor::CreateMainObjects()
 	std::vector<Texture> textures = {};
 	editorGridRenderer = ObjectsManager->Instantiate<ModelRendererComponent>();
 	editorGridRenderer->SetModel(new Model({ new Mesh(vertices, triangles, textures) }));
-	editorGridRenderer->SetShader(&ResourceManager->GetShader("Grid"));
+	editorGridRenderer->SetShader(ResourceManager->GetShader("Grid"));
 	editorGridRenderer->gameObject->name = "Grid Renderer";
-	editorGridRenderer->useDepthBuffer = true;
+	editorGridRenderer->renderQueueIndex = -1;
 	EngineEditor::EnableObjectSerialization(editorGridRenderer->gameObject, false);
 
-	// creating grid
+	// creating axes
 	vertices =
 	{
 		Vector3(0), Vector3(0),
@@ -1604,10 +1682,11 @@ void EngineEditor::CreateMainObjects()
 	editorAxesRenderer = ObjectsManager->Instantiate<ModelRendererComponent>();
 	Mesh* axesMesh = new Mesh(vertices, triangles, textures);
 	axesMesh->wireframeWidth = 3;
-	axesMesh->SetDrawMode(Mesh::DrawMode::Wireframe);
+	axesMesh->SetDrawMode(DrawMode::Wireframe);
 	editorAxesRenderer->SetModel(new Model({ axesMesh }));
-	editorAxesRenderer->SetShader(&ResourceManager->GetShader("Axis"));
+	editorAxesRenderer->SetShader(ResourceManager->GetShader("Axis"));
 	editorAxesRenderer->gameObject->name = "Axis";
+	editorAxesRenderer->renderQueueIndex = 1;
 	EngineEditor::EnableObjectSerialization(editorAxesRenderer->gameObject, false);
 	editorAxesRenderer->gameObject->isActive = false;
 }
@@ -1782,9 +1861,19 @@ void EngineEditor::HandleEditorShortcuts()
 			EngineEditor::SaveProject();
 	}
 
-	if (EventSystem->GetKeyClick(GLFW_KEY_E))
+	if (EventSystem->GetKeyClick(GLFW_KEY_ENTER))
 	{
 		EngineEditor::PlaySimulation(!EngineEditor::SimulationIsPlaying());
+	}
+
+	if (EventSystem->GetKeyClick(GLFW_KEY_ESCAPE))
+	{
+		// close all modal windows
+		if (createComponent || changeObjectName || uploadResource)
+			createComponent = changeObjectName = uploadResource = false;
+		// if all windows were already closed then deselect current game object
+		else
+			selectedGameObject = nullptr;
 	}
 }
 void EngineEditor::CheckTextInputActive()
@@ -1792,4 +1881,10 @@ void EngineEditor::CheckTextInputActive()
 	EventsController->enableMouseWheelEvent = 
 		EventsController->enableKeyboardEvent = 
 		!ImGui::GetIO().WantCaptureKeyboard;
+}
+void EngineEditor::DrawEditorOverlay()
+{
+	if (!currentProject || simulationIsPlaying)
+		return;
+	editorAxesRenderer->Render();
 }

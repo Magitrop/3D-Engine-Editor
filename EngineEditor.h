@@ -1,6 +1,8 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <mutex>
+#include <GLFW/glfw3.h>
 
 #include <nlohmann/json.hpp>
 using Json = nlohmann::json;
@@ -9,6 +11,7 @@ class GameObject;
 class Component;
 class CameraComponent;
 class ModelRendererComponent;
+class Model;
 class EngineEditor final
 {
 	EngineEditor() = delete;
@@ -43,6 +46,9 @@ class EngineEditor final
 	static std::vector<std::tuple<std::string, Json::value_t, FieldData>> fields;
 
 	static bool uploadResource;
+	static std::vector<std::string> uploadingResources;
+	static std::mutex uploadingResourcesMutex;
+	static std::vector<std::pair<Model*, GLFWwindow*>> pendingLoadedModels; // models whose meshes should be rebuilt
 	static char* vertexShaderPath;
 	static char* fragmentShaderPath;
 	static char shaderName[50];
@@ -72,6 +78,9 @@ class EngineEditor final
 	static void DrawLoadedAssetsMenu();
 
 	static bool DrawUploadResourceMenu();
+	static void DrawLoadingResourcesQueue();
+	static void IteratePendingLoadedModels(); // check if there are pending models which meshes should be rebuilt
+
 	static bool DrawChangeObjectNameMenu();
 	static bool DrawCreateComponentMenu();
 
@@ -104,4 +113,5 @@ public:
 
 	static void HandleEditorShortcuts();
 	static void CheckTextInputActive();
+	static void DrawEditorOverlay();
 };

@@ -9,7 +9,7 @@
 CameraComponent* EditorCamera::camera;
 TransformComponent* EditorCamera::cameraTransform;
 
-Vector2 EditorCamera::movementDirection;
+Vector3 EditorCamera::movementDirection;
 Vector3 EditorCamera::sightDirection = Vector3(0, 0, 1);
 
 float EditorCamera::rotationSpeed = 0.03f;
@@ -48,9 +48,19 @@ void EditorCamera::OnMouseWheel(double xoffset, double yoffset)
 }
 void EditorCamera::OnUpdate()
 {
+	if (EventSystem->GetKey(GLFW_KEY_LEFT_CONTROL))
+		return;
+
 	if (EventSystem->GetKey(GLFW_KEY_W))
-		movementDirection.y = 1;
+		movementDirection.z = 1;
 	else if (EventSystem->GetKey(GLFW_KEY_S))
+		movementDirection.z = -1;
+	else
+		movementDirection.z = 0;
+
+	if (EventSystem->GetKey(GLFW_KEY_Q))
+		movementDirection.y = 1;
+	else if (EventSystem->GetKey(GLFW_KEY_E))
 		movementDirection.y = -1;
 	else
 		movementDirection.y = 0;
@@ -62,12 +72,15 @@ void EditorCamera::OnUpdate()
 	else
 		movementDirection.x = 0;
 
-	if (movementDirection.x || movementDirection.y)
+	if (movementDirection.x || 
+		movementDirection.y || 
+		movementDirection.z)
 	{
 		movementDirection = glm::normalize(movementDirection);
-		Vector3 movement = 
-			movementDirection.y * movementSpeed * cameraTransform->GetForward() +
-			movementDirection.x * movementSpeed * cameraTransform->GetRight();
+		Vector3 movement =
+			(movementDirection.x * cameraTransform->GetRight() +
+				movementDirection.y * cameraTransform->GetUp() +
+				movementDirection.z * cameraTransform->GetForward()) * movementSpeed * (EventSystem->GetKey(GLFW_KEY_LEFT_SHIFT) ? 3.f : 1.f);
 		cameraTransform->Translate(movement);
 		camera->RecalculateViewMatrix();
 	}

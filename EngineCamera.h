@@ -10,7 +10,7 @@ struct EditorCamera final
 	static CameraComponent* camera;
 	static TransformComponent* cameraTransform;
 
-	static Vector2 movementDirection;
+	static Vector3 movementDirection;
 	static Vector3 sightDirection;
 	static float rotationSpeed;
 	static float movementSpeed;

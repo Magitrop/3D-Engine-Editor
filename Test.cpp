@@ -17,6 +17,7 @@
 #include <EventsController.h>
 #include <LightingController.h>
 #include <RenderingController.h>
+#include <windows.h>
 
 #include <nlohmann/json.hpp>
 using Json = nlohmann::json;
@@ -24,18 +25,16 @@ using Json = nlohmann::json;
 void LoadShaders()
 {
 	//ResourceManager->UploadShader(Shader("source\\TextVertexShader.vertexshader", "source\\TextFragmentShader.fragmentshader"), "Text");
-	ResourceManager->UploadShader(Shader("source\\simple-vert.glsl", "source\\simple-frag.glsl"), "Simple");
-	ResourceManager->UploadShader(Shader("source\\depth-vert.glsl", "source\\depth-frag.glsl"), "Depth");
-	ResourceManager->UploadShader(Shader("source\\shadows-vert.glsl", "source\\shadows-frag.glsl"), "Shadows");
-	ResourceManager->UploadShader(Shader("source\\grid-vert.glsl", "source\\grid-frag.glsl"), "Grid");
-	ResourceManager->UploadShader(Shader("source\\axis-vert.glsl", "source\\axis-frag.glsl"), "Axis");
+	ResourceManager->UploadShader(new Shader("source\\simple-vert.glsl", "source\\simple-frag.glsl"), "Simple");
+	ResourceManager->UploadShader(new Shader("source\\depth-vert.glsl", "source\\depth-frag.glsl"), "Depth");
+	ResourceManager->UploadShader(new Shader("source\\shadows-vert.glsl", "source\\shadows-frag.glsl"), "Shadows");
+	ResourceManager->UploadShader(new Shader("source\\grid-vert.glsl", "source\\grid-frag.glsl"), "Grid");
+	ResourceManager->UploadShader(new Shader("source\\axis-vert.glsl", "source\\axis-frag.glsl"), "Axis");
 }
 void LoadModels()
 {
-	ResourceManager->UploadModel(Model("source\\castle.fbx"), "Castle");
+	ResourceManager->UploadModel(new Model("source\\castle.fbx"), "Castle");
 }
-
-#include <windows.h>
 
 int main()
 {
@@ -48,7 +47,7 @@ int main()
 	LoadShaders();
 	//LoadModels();
 
-	Lightings->lightPosition = Vector3(-1, 0, 0);
+	Lightings->lightPosition = Vector3(-1, 1, 1);
 
 	EngineEditor::SetEditorCallbacks();
 	while (!glfwWindowShouldClose(window))
@@ -58,13 +57,17 @@ int main()
 		glViewport(0, 0, Screen->GetWindowResolution().x, Screen->GetWindowResolution().y);
 		glClear(GL_COLOR_BUFFER_BIT);
 
-		glActiveTexture(GL_TEXTURE0);
+		glActiveTexture(GL_TEXTURE0 + 10);
 		glBindTexture(GL_TEXTURE_2D, LightingController::GetDepthMapID());
-		ResourceManager->GetShader("Shadows").SetInt("shadowMap", 0);
+		//std::cout << LightingController::GetDepthMapID() << std::endl;
+		ResourceManager->GetShader("Shadows")->SetInt("shadowMap", 10);
+		ResourceManager->GetShader("Simple")->SetInt("shadowMap", 10);
 
-		RenderingController::Render(true);
-		glClear(GL_DEPTH_BUFFER_BIT);
-		RenderingController::Render(false);
+		for (int i = -1; i <= 1; i++)
+		{
+			RenderingController::Render(i);
+			glClear(GL_DEPTH_BUFFER_BIT);
+		}
 
 		EngineEditor::HandleEditorShortcuts();
 		EngineEditor::CheckTextInputActive();
